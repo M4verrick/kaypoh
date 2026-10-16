@@ -8,6 +8,7 @@ import { firstUrl, runTurn, type ImageBlock } from "./agent";
 import { openDb, type Watch } from "./db";
 import { hostOf } from "./tinyfish";
 import { startWatcher } from "./watches";
+const ts = () => new Date().toLocaleTimeString("en-SG", { hour12: false, timeZone: process.env.KAYPOH_TZ ?? "Asia/Singapore" });
 
 /** Collects a burst of items per key and flushes them as one batch after `ms` of quiet. `onFirst` fires when a burst starts. */
 export function createDebouncer<T>(ms: number, flush: (key: string, items: T[]) => unknown, onFirst?: (key: string, item: T) => unknown) {
@@ -98,7 +99,7 @@ if (import.meta.main) {
       const space = await resolveSpace(w);
       if (!space) throw new Error(`no space for watch #${w.id}`);
       await sendText(space, w.platform, text);
-      console.log(`[alert] watch #${w.id} -> ${w.platform} ${w.sender}: ${text.slice(0, 160).replace(/\n/g, " / ")}`);
+      console.log(`${ts()} [alert] watch #${w.id} -> ${w.platform} ${w.sender}: ${text.slice(0, 160).replace(/\n/g, " / ")}`);
     },
   });
 
@@ -107,14 +108,14 @@ if (import.meta.main) {
     const last = items[items.length - 1]!.message;
     const text = items.map((i) => i.text).join("\n");
     const images = items.flatMap((i) => (i.image ? [i.image] : []));
-    console.log(`[in] ${platform} ${sender}: ${text.slice(0, 120).replace(/\n/g, " / ")}${images.length ? ` (+${images.length} photo)` : ""}`);
+    console.log(`${ts()} [in] ${platform} ${sender}: ${text.slice(0, 120).replace(/\n/g, " / ")}${images.length ? ` (+${images.length} photo)` : ""}`);
     const started = Date.now();
     let toldLongJob = false;
     const onLongJob = () => {
       if (toldLongJob) return;
       toldLongJob = true;
       void last.react("👀").catch(() => {});
-      console.log(`[notice] ${platform} ${sender}: on-it sent`);
+      console.log(`${ts()} [notice] ${platform} ${sender}: on-it sent`);
       void space.send("On it. That page needs a real browser, give me a couple of minutes.").catch(() => {}); // typing dots time out long before a browser run ends
     };
     await space.responding(async () => {
@@ -122,7 +123,7 @@ if (import.meta.main) {
         const turn = await runTurn(db, { spaceId, sender, platform, text, images, onLongJob });
         await sendText(space, platform, turn.reply);
         turn.commit(); // history records only what was actually delivered
-        console.log(`[out] ${platform} ${sender} (${Math.round((Date.now() - started) / 1000)} s): ${turn.reply.slice(0, 160).replace(/\n/g, " / ")}`);
+        console.log(`${ts()} [out] ${platform} ${sender} (${Math.round((Date.now() - started) / 1000)} s): ${turn.reply.slice(0, 160).replace(/\n/g, " / ")}`);
       } catch (err) {
         console.error(err);
         await space.send("Something broke on my side. Try again in a bit.");
@@ -147,10 +148,10 @@ if (import.meta.main) {
       const im = imessage(app);
       const space = await im.space.create(await im.user(knock));
       await space.send("Hey, Kaypoh here. Text me a link or a question and I'll check it on the web for you.");
-      console.log(`[knock] opener sent to ${knock}`);
+      console.log(`${ts()} [knock] opener sent to ${knock}`);
     } catch (err) {
       // Free/Pro shared lines cannot start a conversation: the person must text the line first (Photon's redirect link does this).
-      console.error(`[knock] could not send to ${knock}: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`${ts()} [knock] could not send to ${knock}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -172,7 +173,7 @@ if (import.meta.main) {
       else void serialize(space.id, () => space.send(`I can't read ${c.name} yet. Photos and text work; other files don't.`));
     } else if (c.type === "voice") void serialize(space.id, () => space.send("Can't listen to voice notes yet. Type it out and I'm on it."));
     else if (c.type === "group") for (const item of c.items) await ingest(space, base, item.content);
-    else if (c.type !== "reaction" && c.type !== "read" && c.type !== "typing") console.log(`[skip] ${base.platform} ${base.sender}: ${c.type}`);
+    else if (c.type !== "reaction" && c.type !== "read" && c.type !== "typing") console.log(`${ts()} [skip] ${base.platform} ${base.sender}: ${c.type}`);
   };
 
   for await (const [space, message] of app.messages) {

@@ -3,6 +3,7 @@ import { jsonSchemaOutputFormat } from "@anthropic-ai/sdk/helpers/json-schema";
 import { MODEL } from "./agent";
 import type { Db, Watch } from "./db";
 import { describeError, fetchPages as realFetchPages, runAgent as realRunAgent } from "./tinyfish";
+const ts = () => new Date().toLocaleTimeString("en-SG", { hour12: false, timeZone: process.env.KAYPOH_TZ ?? "Asia/Singapore" });
 
 export const TZ = process.env.KAYPOH_TZ ?? "Asia/Singapore";
 const JUDGE_MODEL = process.env.KAYPOH_JUDGE_MODEL ?? MODEL; // the judge is a small structured call; a cheaper model is a one-line switch
@@ -126,7 +127,7 @@ export async function tick(db: Db, deps: Deps): Promise<void> {
       db.updateWatch(w.id, { last_check_at: now }); // claim the slot before the slow fetch so an overlapping tick skips it
 
       const page = await readPage(w);
-      console.log(`[watch] #${w.id} ${w.mode} ${w.url}: ${page.text === null ? `unreadable (${page.why})` : `read ${page.text.length} chars`}`);
+      console.log(`${ts()} [watch] #${w.id} ${w.mode} ${w.url}: ${page.text === null ? `unreadable (${page.why})` : `read ${page.text.length} chars`}`);
       if (page.text === null) {
         const n = w.error_count + 1;
         if (n < 3) {
@@ -143,7 +144,7 @@ export async function tick(db: Db, deps: Deps): Promise<void> {
         continue;
       }
       const j = await judge(w.condition, page.text, w.last_value);
-      console.log(`[watch] #${w.id} judged: ${j.met ? "MET" : "not met"} value=${j.value} note=${j.note}`);
+      console.log(`${ts()} [watch] #${w.id} judged: ${j.met ? "MET" : "not met"} value=${j.value} note=${j.note}`);
       const d = decide(w, j, now);
       db.updateWatch(w.id, { ...d.patch, last_hash: hash, error_count: 0 });
       if (d.notice) await notify(w, d.notice);

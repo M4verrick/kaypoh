@@ -36,9 +36,11 @@ describe("ensureSources: cite it or say you couldn't read it", () => {
     expect(r.text).not.toContain("https://");
     expect(r.primaryUrl).toBe(used[0]);
   });
-  test("leaves a reply alone when it already cites a source", () => {
+  test("leaves a reply alone when it already cites a source, by URL or by host", () => {
     const reply = "It's S$78 on klook.com/activity/123.";
     expect(ensureSources(reply, { used, searched: [], failed: [] }).text).toBe(reply);
+    const byHost = "The cheapest on ikea.com is the SVALLET at S$6.90.";
+    expect(ensureSources(byHost, { used: ["https://www.ikea.com/sg/en/cat/work-lamps-20502/"], searched: [], failed: [] }).text).toBe(byHost);
   });
   test("search-only answers still get their sources", () => {
     const r = ensureSources("Tickets go on sale 2 Nov.", { used: [], searched: ["https://www.ticketmaster.sg/x"], failed: [] }, { inlineUrl: true });
