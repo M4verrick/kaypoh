@@ -79,10 +79,23 @@ export async function runAgent(
   const submitted = Date.now();
   const hardCap = submitted + maxSeconds * 1000 + grace + (deps.queueMs ?? 180_000);
   let deadline = submitted + maxSeconds * 1000 + grace;
+  let pollFailures = 0;
   while (Date.now() < Math.min(deadline, hardCap)) {
     await Bun.sleep(deps.pollMs ?? 5000);
-    const res = await f(`${AGENT}/v1/runs/${started.run_id}`, { headers });
+    let res: Response;
+    try {
+      res = await f(`${AGENT}/v1/runs/${started.run_id}`, { headers });
+    } catch (err) {
+      if (++pollFailures > 8) throw err;
+      continue; // network blip while the run keeps going server-side
+    }
+    if (res.status === 429 || res.status >= 500) {
+      if (++pollFailures > 8) throw new Error(await httpError("Agent", res));
+      await Bun.sleep(deps.pollMs ?? 5000); // back off; the run itself is unaffected
+      continue;
+    }
     if (!res.ok) throw new Error(await httpError("Agent", res));
+    pollFailures = 0;
     const run = (await res.json()) as { status: string; started_at?: string | null; result: unknown; error: { message?: string } | null; num_of_steps: number | null; streaming_url: string | null };
     if (run.status === "COMPLETED" || run.status === "FAILED" || run.status === "CANCELLED") {
       return { run_id: started.run_id, status: run.status, result: run.result ?? null, error: run.error?.message ?? null, steps: run.num_of_steps ?? null, streaming_url: run.streaming_url ?? null };

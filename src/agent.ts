@@ -175,7 +175,14 @@ export async function runTurn(db: Db, turn: Turn): Promise<TurnResult> {
             }
             turn.onLongJob?.();
             log("run_agent", `read (fallback for ${describeError(e)}) ${e.url}`);
-            const run = await runAgent({ url: e.url, goal: `Read this page for: ${a.purpose}.` + READ_SUFFIX, output_schema: AGENT_SCHEMA, max_seconds: AGENT_MAX_SECONDS });
+            let run;
+            try {
+              run = await runAgent({ url: e.url, goal: `Read this page for: ${a.purpose}.` + READ_SUFFIX, output_schema: AGENT_SCHEMA, max_seconds: AGENT_MAX_SECONDS });
+            } catch (err) {
+              log("run_agent", `fallback threw: ${err instanceof Error ? err.message : String(err)}`);
+              budgetNote = `The browser read of ${e.url} failed on our side (${err instanceof Error ? err.message : String(err)}); do not start another browser run for it this turn, say the page could not be read.`;
+              break;
+            }
             db.recordAgentRun(turn.sender, run.steps);
             log("run_agent", `${run.status} in ${run.steps ?? "?"} steps${run.streaming_url ? ` live ${run.streaming_url}` : ""}`);
             if (run.status === "COMPLETED" && run.result) {
