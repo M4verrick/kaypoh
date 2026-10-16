@@ -16,7 +16,8 @@ contact card, and inbound photos. Inbound-first by design.
 **TinyFish** is the web layer, three endpoints with distinct jobs:
 - **Search**: find alternatives and context (`purpose`, recency filters).
 - **Fetch**: read the user's link and the best hits as markdown; also powers watches. Failed pages
-  come back with their reason, and the reply says so.
+  come back with their reason, and the reply says so. If the user's own link refuses plain fetching
+  (Ticketmaster, for one), it is read in a real browser on the spot, read-only, without asking.
 - **Agent**: only when Fetch cannot do the job (bot walls, date pickers, filters, checkout). Anything
   that acts needs the user's "yes" first, runs exactly the request they confirmed, and stops at the
   final confirmation page in its own browser. It then tells you what it selected and gives you the
@@ -35,8 +36,12 @@ bun run src/index.ts    # terminal chat for local use; iMessage joins when the P
 bun test
 ```
 
-On Photon's free plan, add your own iMessage handle under **Users** in the dashboard first; shared
-lines only message registered users.
+On Photon's free plan, add your own phone number under **Users** in the dashboard first; shared
+lines only message registered users, and the shared pool routes **phone-number handles only**. If your
+iPhone starts iMessages from an email address, Photon's line auto-replies that it cannot route the
+text; switch Settings → Messages → Send & Receive → "Start new conversations from" to your number.
+The free plan also cannot text first: the person opens the thread (Photon gives each user a redirect
+link that does this), and the agent replies.
 
 It runs as one process on a Mac. Watches are checked while the process is up; a check that falls
 during sleep runs when the Mac wakes. Text from web pages is treated as data, never as instructions,

@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { jsonSchemaOutputFormat } from "@anthropic-ai/sdk/helpers/json-schema";
 import { MODEL } from "./agent";
 import type { Db, Watch } from "./db";
-import { describeError, fetchPages as realFetchPages } from "./tinyfish";
+import { describeError, fetchPages as realFetchPages, runAgent as realRunAgent } from "./tinyfish";
 
 export const TZ = process.env.KAYPOH_TZ ?? "Asia/Singapore";
 const JUDGE_MODEL = process.env.KAYPOH_JUDGE_MODEL ?? MODEL; // the judge is a small structured call; a cheaper model is a one-line switch
@@ -10,6 +10,7 @@ export type Judgement = { met: boolean; value: string; note: string };
 export type Deps = {
   send: (w: Watch, text: string) => Promise<void>;
   fetchPages?: typeof realFetchPages;
+  runAgent?: typeof realRunAgent;
   judge?: (condition: string, pageText: string, lastValue: string | null) => Promise<Judgement>;
   now?: () => number;
 };
@@ -82,7 +83,23 @@ export const deliverAt = (w: Watch, now: number): number =>
 export async function tick(db: Db, deps: Deps): Promise<void> {
   const now = (deps.now ?? Date.now)();
   const fetchP = deps.fetchPages ?? realFetchPages;
+  const runA = deps.runAgent ?? realRunAgent;
   const judge = deps.judge ?? judgeWithClaude;
+  /** Page text for the judge: plain Fetch, or a read-only browser run for sites that block it. */
+  const readPage = async (w: Watch): Promise<{ text: string | null; why: string }> => {
+    if (w.mode === "agent") {
+      const run = await runA({
+        url: w.url,
+        goal: `Read this page and report the current price(s), availability and dates relevant to: ${w.condition}. Do not log in, buy, book or submit anything.`,
+        output_schema: { type: "object", properties: { summary: { type: "string" } }, required: ["summary"] },
+        max_seconds: 240, // scheduled, so it can afford to be slow; Ticketmaster took ~2.5 min
+      });
+      const summary = (run.result as { summary?: string } | null)?.summary;
+      return run.status === "COMPLETED" && summary ? { text: summary, why: "" } : { text: null, why: run.error ?? run.status.toLowerCase() };
+    }
+    const { pages, errors } = await fetchP([w.url], { ttl: 0, purpose: `Check whether: ${w.condition}` });
+    return pages[0] ? { text: pages[0].text, why: "" } : { text: null, why: errors[0] ? describeError(errors[0]) : "no content" };
+  };
   // Persist first, then send, then clear: a failed send leaves the notice queued for the next tick instead of lost.
   const notify = async (w: Watch, text: string) => {
     const when = deliverAt(w, now);
@@ -108,15 +125,15 @@ export async function tick(db: Db, deps: Deps): Promise<void> {
       if (w.last_check_at && now - w.last_check_at < w.interval_min * 60_000) continue;
       db.updateWatch(w.id, { last_check_at: now }); // claim the slot before the slow fetch so an overlapping tick skips it
 
-      const { pages, errors } = await fetchP([w.url], { ttl: 0, purpose: `Check whether: ${w.condition}` });
-      const page = pages[0];
-      if (!page) {
+      const page = await readPage(w);
+      console.log(`[watch] #${w.id} ${w.mode} ${w.url}: ${page.text === null ? `unreadable (${page.why})` : `read ${page.text.length} chars`}`);
+      if (page.text === null) {
         const n = w.error_count + 1;
         if (n < 3) {
           db.updateWatch(w.id, { error_count: n });
         } else {
           db.updateWatch(w.id, { active: 0, error_count: n });
-          await notify(w, `I can't read ${w.url} any more (${errors[0] ? describeError(errors[0]) : "no content"}), so I've stopped watching it.`);
+          await notify(w, `I can't read ${w.url} any more (${page.why}), so I've stopped watching it.`);
         }
         continue;
       }
@@ -125,7 +142,9 @@ export async function tick(db: Db, deps: Deps): Promise<void> {
         db.updateWatch(w.id, { error_count: 0 }); // ponytail: no model call when the page is unchanged
         continue;
       }
-      const d = decide(w, await judge(w.condition, page.text, w.last_value), now);
+      const j = await judge(w.condition, page.text, w.last_value);
+      console.log(`[watch] #${w.id} judged: ${j.met ? "MET" : "not met"} value=${j.value} note=${j.note}`);
+      const d = decide(w, j, now);
       db.updateWatch(w.id, { ...d.patch, last_hash: hash, error_count: 0 });
       if (d.notice) await notify(w, d.notice);
     } catch (err) {

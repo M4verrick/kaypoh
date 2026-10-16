@@ -74,7 +74,7 @@ export async function runAgent(
   const started = (await start.json()) as { run_id: string | null; error: { message?: string } | null };
   if (!started.run_id) throw new Error(`Agent did not start: ${started.error?.message ?? "unknown error"}`);
 
-  const deadline = Date.now() + maxSeconds * 1000 + (deps.graceMs ?? 30_000);
+  const deadline = Date.now() + maxSeconds * 1000 + (deps.graceMs ?? 60_000); // anti-bot sites can run past their own cap by a minute
   while (Date.now() < deadline) {
     await Bun.sleep(deps.pollMs ?? 5000);
     const res = await f(`${AGENT}/v1/runs/${started.run_id}`, { headers });

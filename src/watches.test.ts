@@ -22,7 +22,7 @@ describe("quiet hours (Asia/Singapore)", () => {
 const baseWatch = (over: Partial<Watch> = {}): Watch => ({
   id: 1, sender: "u", space_id: "chat-1", platform: "terminal", url: "https://shop.example/x", condition: "price below S$60",
   interval_min: 60, any_time: 1, created_at: 0, expires_at: 10 ** 13, last_check_at: null, last_hash: null, last_value: null,
-  notified_at: null, notify_count: 0, error_count: 0, pending_notice: null, deliver_after: null, active: 1, ...over,
+  notified_at: null, notify_count: 0, error_count: 0, pending_notice: null, deliver_after: null, active: 1, mode: "fetch", ...over,
 });
 
 describe("decide", () => {
@@ -114,6 +114,23 @@ describe("tick", () => {
     await tick(h.db, flaky);
     expect(h.sent.length).toBe(1);
     expect(h.db.watchesToVisit()[0]!.pending_notice).toBeNull();
+  });
+
+  test("agent-mode watches read through a browser run instead of Fetch", async () => {
+    const h = harness(noon);
+    h.db.addWatch({ sender: "u", space_id: "chat-1", platform: "terminal", url: "https://ticketmaster.example/x", condition: "price below S$40", interval_min: 360, any_time: true, days: 14, mode: "agent" }, noon);
+    const agentCalls: string[] = [];
+    const deps = {
+      ...h.deps,
+      fetchPages: async () => { throw new Error("fetch must not be used for agent-mode watches"); },
+      runAgent: async (req: { url: string; goal: string }) => (agentCalls.push(req.url), { run_id: "r", status: "COMPLETED" as const, result: { summary: "Cat 1 S$168, Cat 3 S$38, on sale" }, error: null, steps: 4, streaming_url: null }),
+    };
+    h.setJudgement({ met: true, value: "S$38", note: "Cat 3 is below your S$40 limit." });
+    await tick(h.db, deps);
+    expect(agentCalls).toEqual(["https://ticketmaster.example/x"]);
+    expect(h.judged.length).toBe(1);
+    expect(h.sent.length).toBe(1);
+    expect(h.sent[0]).toContain("S$38");
   });
 
   test("expiry sends one closing text and deactivates", async () => {

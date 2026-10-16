@@ -62,9 +62,12 @@ type Inbound = { space: Space; message: Message; sender: string; platform: strin
 
 if (import.meta.main) {
   const db = openDb();
-  const providers = [terminal.config(), ...(process.env.SPECTRUM_PROJECT_ID ? [imessage.config()] : [])];
+  const withTerminal = process.env.KAYPOH_TERMINAL !== "0"; // KAYPOH_TERMINAL=0 for a headless service
+  const withIMessage = Boolean(process.env.SPECTRUM_PROJECT_ID);
+  const providers = [...(withTerminal ? [terminal.config()] : []), ...(withIMessage ? [imessage.config()] : [])];
+  if (!providers.length) throw new Error("nothing to run: enable the terminal or set SPECTRUM_PROJECT_ID/SECRET");
   const app = await Spectrum({ providers }); // project id/secret come from SPECTRUM_PROJECT_ID / SPECTRUM_PROJECT_SECRET
-  console.log(`Kaypoh up: ${providers.length === 2 ? "terminal + iMessage" : "terminal only (set SPECTRUM_PROJECT_ID and SPECTRUM_PROJECT_SECRET for iMessage)"}`);
+  console.log(`Kaypoh up: ${[withTerminal && "terminal", withIMessage && "iMessage"].filter(Boolean).join(" + ")}`);
 
   const spaces = new Map<string, Space>();
   const chains = new Map<string, Promise<unknown>>();
@@ -103,11 +106,14 @@ if (import.meta.main) {
     const last = items[items.length - 1]!.message;
     const text = items.map((i) => i.text).join("\n");
     const images = items.flatMap((i) => (i.image ? [i.image] : []));
+    console.log(`[in] ${platform} ${sender}: ${text.slice(0, 120).replace(/\n/g, " / ")}${images.length ? ` (+${images.length} photo)` : ""}`);
+    const started = Date.now();
     await space.responding(async () => {
       try {
         const turn = await runTurn(db, { spaceId, sender, platform, text, images, onLongJob: () => void last.react("👀").catch(() => {}) });
         await sendText(space, platform, turn.reply);
         turn.commit(); // history records only what was actually delivered
+        console.log(`[out] ${platform} ${sender} (${Math.round((Date.now() - started) / 1000)} s): ${turn.reply.slice(0, 160).replace(/\n/g, " / ")}`);
       } catch (err) {
         console.error(err);
         await space.send("Something broke on my side. Try again in a bit.");
@@ -124,6 +130,20 @@ if (import.meta.main) {
       void first.space.startTyping().catch(() => {}); // typing dots too; responding() takes over at flush
     },
   );
+
+  // `bun run src/index.ts --knock=+6591234567` sends a text-only opener so the thread exists on that phone (registered users only).
+  const knock = process.argv.find((a) => a.startsWith("--knock="))?.slice("--knock=".length);
+  if (knock && withIMessage) {
+    try {
+      const im = imessage(app);
+      const space = await im.space.create(await im.user(knock));
+      await space.send("Hey, Kaypoh here. Text me a link or a question and I'll check it on the web for you.");
+      console.log(`[knock] opener sent to ${knock}`);
+    } catch (err) {
+      // Free/Pro shared lines cannot start a conversation: the person must text the line first (Photon's redirect link does this).
+      console.error(`[knock] could not send to ${knock}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.on(sig, async () => {

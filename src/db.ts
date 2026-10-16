@@ -9,7 +9,7 @@ export type Watch = {
   interval_min: number; any_time: number; created_at: number; expires_at: number;
   last_check_at: number | null; last_hash: string | null; last_value: string | null;
   notified_at: number | null; notify_count: number; error_count: number;
-  pending_notice: string | null; deliver_after: number | null; active: number;
+  pending_notice: string | null; deliver_after: number | null; active: number; mode: "fetch" | "agent";
 };
 
 /** A "yes" is only good for this long after the question was asked. */
@@ -30,9 +30,13 @@ export function openDb(path = process.env.KAYPOH_DB ?? "kaypoh.sqlite") {
       id integer primary key, sender text not null, space_id text not null, platform text not null, url text not null, condition text not null,
       interval_min integer not null, any_time integer not null default 0, created_at integer not null, expires_at integer not null,
       last_check_at integer, last_hash text, last_value text, notified_at integer, notify_count integer not null default 0,
-      error_count integer not null default 0, pending_notice text, deliver_after integer, active integer not null default 1);
+      error_count integer not null default 0, pending_notice text, deliver_after integer, active integer not null default 1, mode text not null default 'fetch');
     create table if not exists agent_runs (id integer primary key, sender text not null, ts integer not null, steps integer);
   `);
+  // ponytail: the one migration so far; replace with a versioned list if more arrive
+  const cols = (db.query("pragma table_info(watches)").all() as { name: string }[]).map((c) => c.name);
+  if (!cols.includes("mode")) db.exec("alter table watches add column mode text not null default 'fetch'");
+
   const pendingConfirm = (sender: string, now: number) =>
     db.query("select * from confirms where sender = ? and confirmed_at is null and consumed_at is null and created_at > ? order by id desc limit 1")
       .get(sender, now - CONFIRM_TTL_MS) as Confirm | null;
@@ -90,11 +94,11 @@ export function openDb(path = process.env.KAYPOH_DB ?? "kaypoh.sqlite") {
     },
 
     // Watches
-    addWatch(w: { sender: string; space_id: string; platform: string; url: string; condition: string; interval_min: number; any_time: boolean; days: number }, now = Date.now()): number {
+    addWatch(w: { sender: string; space_id: string; platform: string; url: string; condition: string; interval_min: number; any_time: boolean; days: number; mode?: "fetch" | "agent" }, now = Date.now()): number {
       return Number(
         db.run(
-          "insert into watches (sender, space_id, platform, url, condition, interval_min, any_time, created_at, expires_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-          [w.sender, w.space_id, w.platform, w.url, w.condition, w.interval_min, w.any_time ? 1 : 0, now, now + w.days * DAY_MS],
+          "insert into watches (sender, space_id, platform, url, condition, interval_min, any_time, created_at, expires_at, mode) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [w.sender, w.space_id, w.platform, w.url, w.condition, w.interval_min, w.any_time ? 1 : 0, now, now + w.days * DAY_MS, w.mode ?? "fetch"],
         ).lastInsertRowid,
       );
     },
