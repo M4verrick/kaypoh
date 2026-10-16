@@ -162,11 +162,8 @@ if (import.meta.main) {
     });
   }
 
-  for await (const [space, message] of app.messages) {
-    if (message.direction === "outbound" || db.isDuplicate(message.id)) continue;
-    spaces.set(space.id, space);
-    const base = { space, message, sender: message.sender?.id ?? space.id, platform: message.platform };
-    const c = message.content;
+  // iMessage delivers a photo with a caption as one "group" of inner messages; unpack it so text and image land in the same batch.
+  const ingest = async (space: Space, base: Omit<Inbound, "text" | "image">, c: Message["content"]): Promise<void> => {
     if (c.type === "text") debounce(space.id, { ...base, text: c.text });
     else if (c.type === "richlink") debounce(space.id, { ...base, text: c.url });
     else if (c.type === "attachment") {
@@ -174,6 +171,13 @@ if (import.meta.main) {
       if (image) debounce(space.id, { ...base, text: "(photo attached)", image });
       else void serialize(space.id, () => space.send(`I can't read ${c.name} yet. Photos and text work; other files don't.`));
     } else if (c.type === "voice") void serialize(space.id, () => space.send("Can't listen to voice notes yet. Type it out and I'm on it."));
-    // reactions, read receipts, typing signals, edits: nothing to do
+    else if (c.type === "group") for (const item of c.items) await ingest(space, base, item.content);
+    else if (c.type !== "reaction" && c.type !== "read" && c.type !== "typing") console.log(`[skip] ${base.platform} ${base.sender}: ${c.type}`);
+  };
+
+  for await (const [space, message] of app.messages) {
+    if (message.direction === "outbound" || db.isDuplicate(message.id)) continue;
+    spaces.set(space.id, space);
+    await ingest(space, { space, message, sender: message.sender?.id ?? space.id, platform: message.platform }, message.content);
   }
 }
