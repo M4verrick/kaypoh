@@ -93,6 +93,17 @@ describe("confirmation gate", () => {
   });
 });
 
+describe("watch dedupe", () => {
+  test("one active watch per page per person", () => {
+    const db = openDb(":memory:");
+    const w = { sender: "u", space_id: "c", platform: "terminal", condition: "below S$40", interval_min: 60, any_time: true, days: 14 };
+    db.addWatch({ ...w, url: "https://ticketmaster.sg/activity/detail/27sg_maroon5" });
+    const dup = db.activeWatches("u").find((x) => x.url.replace(/^https?:\/\/(www\.)?/, "") === "ticketmaster.sg/activity/detail/27sg_maroon5");
+    expect(dup?.id).toBe(1);
+    expect(db.activeWatches("u").length).toBe(1);
+  });
+});
+
 describe("db", () => {
   test("isDuplicate is false once, then true", () => {
     const db = openDb(":memory:");

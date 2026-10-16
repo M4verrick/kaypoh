@@ -108,9 +108,17 @@ if (import.meta.main) {
     const images = items.flatMap((i) => (i.image ? [i.image] : []));
     console.log(`[in] ${platform} ${sender}: ${text.slice(0, 120).replace(/\n/g, " / ")}${images.length ? ` (+${images.length} photo)` : ""}`);
     const started = Date.now();
+    let toldLongJob = false;
+    const onLongJob = () => {
+      if (toldLongJob) return;
+      toldLongJob = true;
+      void last.react("👀").catch(() => {});
+      console.log(`[notice] ${platform} ${sender}: on-it sent`);
+      void space.send("On it. That page needs a real browser, give me a couple of minutes.").catch(() => {}); // typing dots time out long before a browser run ends
+    };
     await space.responding(async () => {
       try {
-        const turn = await runTurn(db, { spaceId, sender, platform, text, images, onLongJob: () => void last.react("👀").catch(() => {}) });
+        const turn = await runTurn(db, { spaceId, sender, platform, text, images, onLongJob });
         await sendText(space, platform, turn.reply);
         turn.commit(); // history records only what was actually delivered
         console.log(`[out] ${platform} ${sender} (${Math.round((Date.now() - started) / 1000)} s): ${turn.reply.slice(0, 160).replace(/\n/g, " / ")}`);
