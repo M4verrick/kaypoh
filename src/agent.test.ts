@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ensureSources, firstUrl, isAffirmative, isNegative } from "./agent";
+import { endsWithYesNo, ensureSources, firstUrl, isAffirmative, isNegative } from "./agent";
 import { CONFIRM_TTL_MS, openDb } from "./db";
 import { createDebouncer, splitForPlatform, toImageBlock } from "./index";
 import { describeError } from "./tinyfish";
@@ -84,6 +84,11 @@ describe("confirmation gate", () => {
     db.requestConfirm("u", "book it again", null, t0 + CONFIRM_TTL_MS + 2);
     db.clearConfirms("u", t0 + CONFIRM_TTL_MS + 3);
     expect(db.pendingConfirm("u", t0 + CONFIRM_TTL_MS + 4)).toBeNull();
+  });
+  test("recognises the assistant's own yes/no question", () => {
+    expect(endsWithYesNo("Should I add 1 adapter to the bag? I'll stop before checkout. yes/no?")).toBe(true);
+    expect(endsWithYesNo("Go ahead, **yes/no?**")).toBe(true);
+    expect(endsWithYesNo("It costs S$29. Want anything else?")).toBe(false);
   });
   test("yes/no detection is whole-message only", () => {
     for (const t of ["yes", "Yes!", "ok", "go ahead", "sure please", "do it"]) expect(isAffirmative(t)).toBe(true);
