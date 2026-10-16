@@ -14,7 +14,7 @@ export type AgentRun = {
 };
 
 const AGENT = "https://agent.tinyfish.ai";
-const MAX_CHARS = 6000; // ponytail: flat per-page cap; use Fetch include_selectors/highlights if pages get too long
+const MAX_TOTAL_CHARS = 15_000; // ponytail: flat budget per fetch call (~4k tokens); use Fetch include_selectors/highlights if pages need more
 
 function key(): string {
   const k = process.env.TINYFISH_API_KEY;
@@ -49,8 +49,10 @@ export async function fetchPages(urls: string[], opts: { purpose?: string; ttl?:
   });
   if (!res.ok) throw new Error(await httpError("Fetch", res));
   const body = (await res.json()) as { results?: (Omit<FetchedPage, "text"> & { text: string | null })[]; errors?: FetchError[] };
+  const results = body.results ?? [];
+  const perPage = Math.max(1500, Math.floor(MAX_TOTAL_CHARS / Math.max(1, results.length)));
   return {
-    pages: (body.results ?? []).map((p) => ({ ...p, text: (p.text ?? "").slice(0, MAX_CHARS) })),
+    pages: results.map((p) => ({ ...p, text: (p.text ?? "").slice(0, perPage) })),
     errors: body.errors ?? [],
   };
 }
@@ -104,6 +106,13 @@ export function describeError(e: FetchError): string {
     target_unreachable: "the site could not be reached",
     empty_content: "the page had no readable text",
     target_http_error: "the site returned an error",
+    content_too_large: "the page is too big to read",
+    proxy_error: "a network hop failed; it may work later",
+    invalid_url: "that is not a public web address",
+    invalid_redirect_url: "it redirected somewhere that is not a public web address",
+    conditional_unsupported: "the page could not be checked for changes",
+    selector_not_matched: "the requested part of the page was not found",
+    selector_unsupported: "that file type cannot be sectioned",
   };
   return `${hostOf(e.url)}: ${why[e.error] ?? e.error}${e.status ? ` (HTTP ${e.status})` : ""}`;
 }

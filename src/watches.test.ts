@@ -52,7 +52,7 @@ describe("tick", () => {
       now: () => now,
       fetchPages: async () => ({ pages: [{ url: "u", final_url: "u", title: null, published_date: null, text: pageText }], errors: [] }),
       judge: async (c: string) => (judged.push(c), judgement),
-      send: async (_w: Watch, text: string) => void sent.push(text),
+      send: async (_w: Watch, text: string): Promise<void> => void sent.push(text),
     };
     return { db, deps, judged, sent, setNow: (t: number) => (now = t), setPage: (t: string) => (pageText = t), setJudgement: (j: Judgement) => (judgement = j) };
   }
@@ -97,6 +97,21 @@ describe("tick", () => {
     expect(h.sent).toEqual([]);
     h.setNow(SGT("2026-10-17T08:00:30").getTime());
     await tick(h.db, h.deps);
+    expect(h.sent.length).toBe(1);
+    expect(h.db.watchesToVisit()[0]!.pending_notice).toBeNull();
+  });
+
+  test("a failed send keeps the notice queued and retries next tick", async () => {
+    const h = harness(noon);
+    h.db.addWatch({ sender: "u", space_id: "chat-1", platform: "terminal", url: "https://shop.example/x", condition: "price below S$60", interval_min: 60, any_time: true, days: 14 }, noon);
+    h.setJudgement({ met: true, value: "S$58", note: "Dropped." });
+    let failOnce = true;
+    const flaky = { ...h.deps, send: async (w: Watch, text: string) => { if (failOnce) { failOnce = false; throw new Error("Target not allowed"); } h.deps.send(w, text); } };
+    await tick(h.db, flaky);
+    expect(h.sent).toEqual([]);
+    expect(h.db.watchesToVisit()[0]!.pending_notice).toContain("S$58");
+    h.setNow(noon + 60_000);
+    await tick(h.db, flaky);
     expect(h.sent.length).toBe(1);
     expect(h.db.watchesToVisit()[0]!.pending_notice).toBeNull();
   });

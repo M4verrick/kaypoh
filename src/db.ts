@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 
 export type Role = "user" | "assistant";
 
-export type Confirm = { id: number; sender: string; summary: string; created_at: number; confirmed_at: number | null; consumed_at: number | null };
+export type Confirm = { id: number; sender: string; summary: string; url: string | null; goal: string | null; created_at: number; confirmed_at: number | null; consumed_at: number | null };
 
 export type Watch = {
   id: number; sender: string; space_id: string; platform: string; url: string; condition: string;
@@ -25,7 +25,7 @@ export function openDb(path = process.env.KAYPOH_DB ?? "kaypoh.sqlite") {
     create table if not exists history (id integer primary key, space_id text not null, role text not null, content text not null, ts integer not null);
     create index if not exists history_space on history(space_id, id);
     create table if not exists seen (message_id text primary key, ts integer not null);
-    create table if not exists confirms (id integer primary key, sender text not null, summary text not null, created_at integer not null, confirmed_at integer, consumed_at integer);
+    create table if not exists confirms (id integer primary key, sender text not null, summary text not null, url text, goal text, created_at integer not null, confirmed_at integer, consumed_at integer);
     create table if not exists watches (
       id integer primary key, sender text not null, space_id text not null, platform text not null, url text not null, condition text not null,
       interval_min integer not null, any_time integer not null default 0, created_at integer not null, expires_at integer not null,
@@ -65,9 +65,10 @@ export function openDb(path = process.env.KAYPOH_DB ?? "kaypoh.sqlite") {
     },
 
     // Confirmation gate: ask -> user says yes -> one run may consume it, within CONFIRM_TTL_MS.
-    requestConfirm(sender: string, summary: string, now = Date.now()): void {
+    /** Stores the exact action awaiting a yes; a later "act" run executes this stored request, not a new one. */
+    requestConfirm(sender: string, summary: string, input: { url: string; goal: string } | null = null, now = Date.now()): void {
       db.run("update confirms set consumed_at = ? where sender = ? and consumed_at is null", [now, sender]);
-      db.run("insert into confirms (sender, summary, created_at) values (?, ?, ?)", [sender, summary, now]);
+      db.run("insert into confirms (sender, summary, url, goal, created_at) values (?, ?, ?, ?, ?)", [sender, summary, input?.url ?? null, input?.goal ?? null, now]);
     },
     pendingConfirm(sender: string, now = Date.now()): Confirm | null {
       return pendingConfirm(sender, now);

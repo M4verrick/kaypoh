@@ -18,7 +18,9 @@ contact card, and inbound photos. Inbound-first by design.
 - **Fetch**: read the user's link and the best hits as markdown; also powers watches. Failed pages
   come back with their reason, and the reply says so.
 - **Agent**: only when Fetch cannot do the job (bot walls, date pickers, filters, checkout). Anything
-  that acts needs the user's "yes" first and always stops at the final confirmation page.
+  that acts needs the user's "yes" first, runs exactly the request they confirmed, and stops at the
+  final confirmation page in its own browser. It then tells you what it selected and gives you the
+  product link to redo it on your phone; it never pays and never pretends its cart is yours.
 
 The brain is Claude via the Anthropic SDK tool runner, with seven tools: `web_search`, `fetch_page`,
 `run_agent`, `set_watch`, `cancel_watch`, `list_watches`, `remember`. Memory is per person, history
@@ -35,3 +37,7 @@ bun test
 
 On Photon's free plan, add your own iMessage handle under **Users** in the dashboard first; shared
 lines only message registered users.
+
+It runs as one process on a Mac. Watches are checked while the process is up; a check that falls
+during sleep runs when the Mac wakes. Text from web pages is treated as data, never as instructions,
+and is never written to long-term memory.

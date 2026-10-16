@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { ensureSources, isAffirmative, isNegative } from "./agent";
+import { ensureSources, firstUrl, isAffirmative, isNegative } from "./agent";
 import { CONFIRM_TTL_MS, openDb } from "./db";
-import { createDebouncer, firstUrl, toImageBlock } from "./index";
+import { createDebouncer, splitForPlatform, toImageBlock } from "./index";
 import { describeError } from "./tinyfish";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -24,24 +24,40 @@ describe("debounce", () => {
 
 describe("ensureSources: cite it or say you couldn't read it", () => {
   const used = ["https://www.klook.com/activity/123", "https://trip.com/x"];
-  test("appends sources when the reply cites none", () => {
-    const out = ensureSources("It's S$78 right now.", { used, failed: [] });
-    expect(out).toContain("Sources:");
-    expect(out).toContain(used[0]);
+  test("appends host names and a primary URL when the reply cites none", () => {
+    const r = ensureSources("It's S$78 right now.", { used, searched: [], failed: [] }, { inlineUrl: true });
+    expect(r.text).toContain("via klook.com, trip.com");
+    expect(r.text).toContain(used[0]!);
+    expect(r.primaryUrl).toBe(used[0]);
+  });
+  test("on iMessage the URL is left for the rich link, not the bubble", () => {
+    const r = ensureSources("It's S$78 right now.", { used, searched: [], failed: [] }, { inlineUrl: false });
+    expect(r.text).toContain("via klook.com");
+    expect(r.text).not.toContain("https://");
+    expect(r.primaryUrl).toBe(used[0]);
   });
   test("leaves a reply alone when it already cites a source", () => {
     const reply = "It's S$78 on klook.com/activity/123.";
-    expect(ensureSources(reply, { used, failed: [] })).toBe(reply);
+    expect(ensureSources(reply, { used, searched: [], failed: [] }).text).toBe(reply);
   });
-  test("names pages that could not be read", () => {
-    const failed = [{ url: "https://www.scoot.com/fare", error: "bot_blocked" }];
-    const out = ensureSources("Found S$89 on trip.com/x.", { used: ["https://trip.com/x"], failed });
-    expect(out).toContain("Couldn't read scoot.com: the site blocks automated readers");
+  test("search-only answers still get their sources", () => {
+    const r = ensureSources("Tickets go on sale 2 Nov.", { used: [], searched: ["https://www.ticketmaster.sg/x"], failed: [] }, { inlineUrl: true });
+    expect(r.text).toContain("via ticketmaster.sg");
+    expect(r.primaryUrl).toBe("https://www.ticketmaster.sg/x");
+  });
+  test("names the user's own page when it could not be read, ignores failed search hits", () => {
+    const failed = [
+      { url: "https://www.scoot.com/fare", error: "bot_blocked" },
+      { url: "https://random-hit.example/p", error: "timeout" },
+    ];
+    const r = ensureSources("Found S$89 on trip.com/x.", { used: ["https://trip.com/x"], searched: [], failed }, { userUrls: ["https://scoot.com/fare/"] });
+    expect(r.text).toContain("Couldn't read scoot.com: the site blocks automated readers");
+    expect(r.text).not.toContain("random-hit");
   });
   test("does not repeat a failure the model already mentioned", () => {
     const failed = [{ url: "https://www.scoot.com/fare", error: "bot_blocked" }];
     const reply = "scoot.com blocked me, but trip.com/x has it at S$89.";
-    expect(ensureSources(reply, { used: ["https://trip.com/x"], failed })).toBe(reply);
+    expect(ensureSources(reply, { used: ["https://trip.com/x"], searched: [], failed }, { userUrls: ["https://www.scoot.com/fare"] }).text).toBe(reply);
   });
 });
 
@@ -50,27 +66,30 @@ describe("confirmation gate", () => {
     const db = openDb(":memory:");
     const t0 = 1_000_000;
     expect(db.takeConfirmed("u", t0)).toBeNull();
-    db.requestConfirm("u", "Add 2 USS tickets for 24 Oct at S$166 to the Klook cart", t0);
+    db.requestConfirm("u", "Add 2 USS tickets for 24 Oct at S$166 to the Klook cart", { url: "https://klook.com/uss", goal: "add 2 tickets for 24 Oct" }, t0);
     expect(db.pendingConfirm("u", t0)?.summary).toContain("USS");
     expect(db.takeConfirmed("u", t0)).toBeNull(); // asked, not yet answered
     expect(db.confirm("u", t0 + 1000)).toBe(true);
-    expect(db.takeConfirmed("u", t0 + 2000)?.summary).toContain("USS");
+    const taken = db.takeConfirmed("u", t0 + 2000);
+    expect(taken?.summary).toContain("USS");
+    expect(taken?.url).toBe("https://klook.com/uss"); // the run executes what was confirmed, not a new request
+    expect(taken?.goal).toBe("add 2 tickets for 24 Oct");
     expect(db.takeConfirmed("u", t0 + 3000)).toBeNull(); // a yes is good for one run only
   });
   test("a stale question cannot be confirmed; 'no' clears it", () => {
     const db = openDb(":memory:");
     const t0 = 1_000_000;
-    db.requestConfirm("u", "book it", t0);
+    db.requestConfirm("u", "book it", null, t0);
     expect(db.confirm("u", t0 + CONFIRM_TTL_MS + 1)).toBe(false);
-    db.requestConfirm("u", "book it again", t0 + CONFIRM_TTL_MS + 2);
+    db.requestConfirm("u", "book it again", null, t0 + CONFIRM_TTL_MS + 2);
     db.clearConfirms("u", t0 + CONFIRM_TTL_MS + 3);
     expect(db.pendingConfirm("u", t0 + CONFIRM_TTL_MS + 4)).toBeNull();
   });
   test("yes/no detection is whole-message only", () => {
-    for (const t of ["yes", "Yes!", "ok", "go ahead", "can", "sure please", "do it"]) expect(isAffirmative(t)).toBe(true);
-    for (const t of ["yes but only if under $60", "what's the price", "okay what about Trip.com"]) expect(isAffirmative(t)).toBe(false);
-    for (const t of ["no", "nah", "stop", "cancel that", "nvm"]) expect(isNegative(t)).toBe(true);
-    expect(isNegative("not sure, what else is there?")).toBe(false);
+    for (const t of ["yes", "Yes!", "ok", "go ahead", "sure please", "do it"]) expect(isAffirmative(t)).toBe(true);
+    for (const t of ["yes but only if under $60", "what's the price", "okay what about Trip.com", "can"]) expect(isAffirmative(t)).toBe(false);
+    for (const t of ["no", "nah", "stop", "cancel that", "nvm", "No thanks."]) expect(isNegative(t)).toBe(true);
+    for (const t of ["not sure, what else is there?", "no idea, what's the price?"]) expect(isNegative(t)).toBe(false);
   });
 });
 
@@ -112,10 +131,15 @@ test("describeError maps codes to plain reasons", () => {
   expect(describeError({ url: "https://x.com/a", error: "target_http_error", status: 503 })).toBe("x.com: the site returned an error (HTTP 503)");
 });
 
-test("firstUrl and image blocks", async () => {
+test("firstUrl, platform split and image blocks", async () => {
   expect(firstUrl("see https://trip.com/x) and more")).toBe("https://trip.com/x");
   expect(firstUrl("no links")).toBeUndefined();
-  const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
+  const split = splitForPlatform("S$58 now.\n\nvia trip.com\nhttps://trip.com/x", "imessage");
+  expect(split.url).toBe("https://trip.com/x");
+  expect(split.text).not.toContain("https://");
+  expect(splitForPlatform("S$58 https://trip.com/x", "terminal")).toEqual({ text: "S$58 https://trip.com/x" });
+  const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]); // not a decodable image: sips fails, raw bytes are used
   expect((await toImageBlock(jpeg, "image/jpeg"))?.source.media_type).toBe("image/jpeg");
   expect(await toImageBlock(jpeg, "application/pdf")).toBeNull();
+  expect(await toImageBlock(new Uint8Array(5_000_000), "image/png")).toBeNull();
 });

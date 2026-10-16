@@ -4,15 +4,17 @@ import { join } from "node:path";
 import { Spectrum, markdown, richlink, type Message, type Space } from "spectrum-ts";
 import { imessage, nativeContactCard } from "spectrum-ts/providers/imessage";
 import { terminal } from "spectrum-ts/providers/terminal";
-import { runTurn, type ImageBlock } from "./agent";
+import { firstUrl, runTurn, type ImageBlock } from "./agent";
 import { openDb, type Watch } from "./db";
+import { hostOf } from "./tinyfish";
 import { startWatcher } from "./watches";
 
-/** Collects a burst of items per key and flushes them as one batch after `ms` of quiet. */
-export function createDebouncer<T>(ms: number, flush: (key: string, items: T[]) => unknown) {
+/** Collects a burst of items per key and flushes them as one batch after `ms` of quiet. `onFirst` fires when a burst starts. */
+export function createDebouncer<T>(ms: number, flush: (key: string, items: T[]) => unknown, onFirst?: (key: string, item: T) => unknown) {
   const pending = new Map<string, { items: T[]; timer?: ReturnType<typeof setTimeout> }>();
   return (key: string, item: T) => {
     const p = pending.get(key) ?? { items: [] };
+    if (!p.items.length) onFirst?.(key, item);
     clearTimeout(p.timer);
     p.items.push(item);
     p.timer = setTimeout(() => {
@@ -24,28 +26,37 @@ export function createDebouncer<T>(ms: number, flush: (key: string, items: T[]) 
 }
 
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+const EXT: Record<string, string> = { "image/heic": "heic", "image/heif": "heif", "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp" };
+const RAW_LIMIT = 4_500_000; // the API rejects ~5 MB images
 
-/** Base64 image block for Claude. HEIC/HEIF (iPhone photos) are converted with macOS sips. Null if unusable. */
+/** Base64 image block for Claude. Every photo is resampled to ≤1600 px JPEG with macOS sips (also converts HEIC). Null if unusable. */
 export async function toImageBlock(bytes: Uint8Array, mime: string): Promise<ImageBlock | null> {
-  let data = bytes;
-  let type = mime.toLowerCase();
-  if (type === "image/heic" || type === "image/heif") {
-    const dir = await mkdtemp(join(tmpdir(), "kaypoh-"));
-    const src = join(dir, "in.heic");
+  const type = mime.toLowerCase();
+  if (!(type in EXT)) return null;
+  const dir = await mkdtemp(join(tmpdir(), "kaypoh-"));
+  try {
+    const src = join(dir, `in.${EXT[type]}`);
     const out = join(dir, "out.jpg");
     await Bun.write(src, bytes);
-    const proc = Bun.spawn(["sips", "-s", "format", "jpeg", src, "--out", out], { stdout: "ignore", stderr: "ignore" });
-    const code = await proc.exited;
-    if (code === 0) data = new Uint8Array(await Bun.file(out).arrayBuffer());
+    const proc = Bun.spawn(["sips", "-s", "format", "jpeg", "-Z", "1600", src, "--out", out], { stdout: "ignore", stderr: "ignore" });
+    if ((await proc.exited) === 0) {
+      return { type: "image", source: { type: "base64", media_type: "image/jpeg", data: Buffer.from(await Bun.file(out).arrayBuffer()).toString("base64") } };
+    }
+  } catch {
+    // fall through to the raw bytes
+  } finally {
     await rm(dir, { recursive: true, force: true });
-    if (code !== 0) return null;
-    type = "image/jpeg";
   }
-  if (!IMAGE_TYPES.has(type)) return null;
-  return { type: "image", source: { type: "base64", media_type: type as ImageBlock["source"]["media_type"], data: Buffer.from(data).toString("base64") } };
+  if (!IMAGE_TYPES.has(type) || bytes.byteLength > RAW_LIMIT) return null;
+  return { type: "image", source: { type: "base64", media_type: type as ImageBlock["source"]["media_type"], data: Buffer.from(bytes).toString("base64") } };
 }
 
-export const firstUrl = (s: string): string | undefined => s.match(/https?:\/\/[^\s)>\]]+/)?.[0];
+/** On iMessage the first URL leaves the bubble and becomes one rich-link preview; elsewhere the text stands alone. */
+export function splitForPlatform(text: string, platform: string): { text: string; url?: string } {
+  const url = firstUrl(text);
+  if (platform !== "imessage" || !url) return { text };
+  return { text: text.replace(url, hostOf(url)).replace(/[ \t]*\n{2,}/g, "\n\n").trim(), url };
+}
 
 type Inbound = { space: Space; message: Message; sender: string; platform: string; text: string; image?: ImageBlock };
 
@@ -63,6 +74,11 @@ if (import.meta.main) {
     chains.set(key, next);
     return next;
   };
+  const sendText = async (space: Space, platform: string, text: string) => {
+    const parts = splitForPlatform(text, platform);
+    await space.send(markdown(parts.text));
+    if (parts.url) await space.send(richlink(parts.url)).catch(() => {});
+  };
 
   const resolveSpace = async (w: Watch): Promise<Space | undefined> => {
     const cached = spaces.get(w.space_id);
@@ -78,7 +94,7 @@ if (import.meta.main) {
     send: async (w, text) => {
       const space = await resolveSpace(w);
       if (!space) throw new Error(`no space for watch #${w.id}`);
-      await space.send(markdown(text));
+      await sendText(space, w.platform, text);
     },
   });
 
@@ -88,20 +104,26 @@ if (import.meta.main) {
     const text = items.map((i) => i.text).join("\n");
     const images = items.flatMap((i) => (i.image ? [i.image] : []));
     await space.responding(async () => {
-      let reply: string;
       try {
-        reply = await runTurn(db, { spaceId, sender, platform, text, images, onLongJob: () => void last.react("👀").catch(() => {}) });
+        const turn = await runTurn(db, { spaceId, sender, platform, text, images, onLongJob: () => void last.react("👀").catch(() => {}) });
+        await sendText(space, platform, turn.reply);
+        turn.commit(); // history records only what was actually delivered
       } catch (err) {
         console.error(err);
-        reply = "Something broke on my side. Try again in a bit.";
+        await space.send("Something broke on my side. Try again in a bit.");
       }
-      await space.send(markdown(reply));
-      const url = firstUrl(reply);
-      if (url && platform === "imessage") await space.send(richlink(url)).catch(() => {});
-      if (platform === "imessage" && db.firstContact(sender)) await space.send(nativeContactCard()).catch(() => {});
+      // Contact card on the second exchange: the first reply stays plain text.
+      if (platform === "imessage" && db.history(spaceId).length >= 4 && db.firstContact(sender)) await space.send(nativeContactCard()).catch(() => {});
     });
   };
-  const debounce = createDebouncer<Inbound>(Number(process.env.KAYPOH_DEBOUNCE_MS ?? 3000), (spaceId, items) => serialize(spaceId, () => handle(spaceId, items)));
+  const debounce = createDebouncer<Inbound>(
+    Number(process.env.KAYPOH_DEBOUNCE_MS ?? 2000),
+    (spaceId, items) => serialize(spaceId, () => handle(spaceId, items)),
+    (_spaceId, first) => {
+      if (first.platform === "imessage") void first.message.read().catch(() => {}); // read receipt the moment the burst starts
+      void first.space.startTyping().catch(() => {}); // typing dots too; responding() takes over at flush
+    },
+  );
 
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.on(sig, async () => {
