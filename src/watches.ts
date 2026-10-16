@@ -1,0 +1,129 @@
+import Anthropic from "@anthropic-ai/sdk";
+import { jsonSchemaOutputFormat } from "@anthropic-ai/sdk/helpers/json-schema";
+import { MODEL } from "./agent";
+import type { Db, Watch } from "./db";
+import { describeError, fetchPages as realFetchPages } from "./tinyfish";
+
+export const TZ = process.env.KAYPOH_TZ ?? "Asia/Singapore";
+export type Judgement = { met: boolean; value: string; note: string };
+export type Deps = {
+  send: (w: Watch, text: string) => Promise<void>;
+  fetchPages?: typeof realFetchPages;
+  judge?: (condition: string, pageText: string, lastValue: string | null) => Promise<Judgement>;
+  now?: () => number;
+};
+
+export function hourIn(d: Date, tz = TZ): number {
+  return Number(new Intl.DateTimeFormat("en-GB", { hour: "numeric", hourCycle: "h23", timeZone: tz }).format(d));
+}
+export const isQuietHour = (d: Date, tz = TZ): boolean => {
+  const h = hourIn(d, tz);
+  return h >= 23 || h < 8;
+};
+/** Next 08:00 in tz. ponytail: hour-stepping; exact for whole-hour offsets like Singapore. */
+export function nextMorning(d: Date, tz = TZ): Date {
+  let t = new Date(d.getTime() + 3600_000 - (d.getTime() % 3600_000));
+  for (let i = 0; i < 25 && hourIn(t, tz) !== 8; i++) t = new Date(t.getTime() + 3600_000);
+  return t;
+}
+
+export async function judgeWithClaude(condition: string, pageText: string, lastValue: string | null): Promise<Judgement> {
+  const client = new Anthropic();
+  const res = await client.messages.parse({
+    model: MODEL,
+    max_tokens: 1024, // three short JSON fields
+    output_config: {
+      effort: "low",
+      format: jsonSchemaOutputFormat({
+        type: "object",
+        properties: {
+          met: { type: "boolean" },
+          value: { type: "string", description: "The current value relevant to the condition, e.g. 'S$58' or 'sold out'" },
+          note: { type: "string", description: "One short sentence for the user, e.g. 'Dropped below your S$60 limit.'" },
+        },
+        required: ["met", "value", "note"],
+        additionalProperties: false,
+      }),
+    },
+    system: "You check whether a watched web page now meets the user's condition. Use only the page text. If the page lacks the information, met is false and note says what is missing.",
+    messages: [{ role: "user", content: `Condition: ${condition}\nPrevious value: ${lastValue ?? "none"}\n\nPage text:\n${pageText}` }],
+  });
+  return res.parsed_output ?? { met: false, value: "unknown", note: "could not read the page clearly" };
+}
+
+export type Decision = { patch: Partial<Watch>; notice?: string };
+
+/** One text when the condition first holds; silence while it keeps holding; re-arm when it stops. */
+export function decide(w: Watch, j: Judgement, now: number): Decision {
+  const patch: Partial<Watch> = { last_check_at: now, last_value: j.value };
+  if (!j.met) {
+    if (w.notified_at) patch.notified_at = null;
+    return { patch };
+  }
+  if (w.notified_at || w.notify_count >= 3) return { patch };
+  patch.notified_at = now;
+  patch.notify_count = w.notify_count + 1;
+  return { patch, notice: `Heads up: ${j.note} Now ${j.value}.\n${w.url}\nWant me to go further on the site? I won't buy or book anything without you.` };
+}
+
+export const deliverAt = (w: Watch, now: number): number =>
+  !w.any_time && isQuietHour(new Date(now)) ? nextMorning(new Date(now)).getTime() : now;
+
+export async function tick(db: Db, deps: Deps): Promise<void> {
+  const now = (deps.now ?? Date.now)();
+  const fetchP = deps.fetchPages ?? realFetchPages;
+  const judge = deps.judge ?? judgeWithClaude;
+  const notify = async (w: Watch, text: string) => {
+    const when = deliverAt(w, now);
+    if (when > now) return db.updateWatch(w.id, { pending_notice: text, deliver_after: when });
+    await deps.send(w, text);
+    db.updateWatch(w.id, { pending_notice: null, deliver_after: null });
+  };
+
+  for (const w of db.watchesToVisit()) {
+    try {
+      if (w.pending_notice) {
+        if (w.deliver_after !== null && w.deliver_after <= now) await notify({ ...w, any_time: 1 }, w.pending_notice);
+        continue;
+      }
+      if (!w.active) continue;
+      if (now >= w.expires_at) {
+        db.updateWatch(w.id, { active: 0 });
+        const days = Math.round((w.expires_at - w.created_at) / 86_400_000);
+        await notify(w, `Stopped watching ${w.url} after ${days} days. It never hit "${w.condition}". Last seen: ${w.last_value ?? "unknown"}.`);
+        continue;
+      }
+      if (w.last_check_at && now - w.last_check_at < w.interval_min * 60_000) continue;
+
+      const { pages, errors } = await fetchP([w.url], { ttl: 0, purpose: `Check whether: ${w.condition}` });
+      const page = pages[0];
+      if (!page) {
+        const n = w.error_count + 1;
+        if (n < 3) {
+          db.updateWatch(w.id, { error_count: n, last_check_at: now });
+        } else {
+          db.updateWatch(w.id, { active: 0, error_count: n, last_check_at: now });
+          await notify(w, `I can't read ${w.url} any more (${errors[0] ? describeError(errors[0]) : "no content"}), so I've stopped watching it.`);
+        }
+        continue;
+      }
+      const hash = Bun.hash(page.text).toString(16);
+      if (hash === w.last_hash) {
+        db.updateWatch(w.id, { last_check_at: now, error_count: 0 }); // ponytail: no model call when the page is unchanged
+        continue;
+      }
+      const d = decide(w, await judge(w.condition, page.text, w.last_value), now);
+      db.updateWatch(w.id, { ...d.patch, last_hash: hash, error_count: 0 });
+      if (d.notice) await notify(w, d.notice);
+    } catch (err) {
+      console.error(`watch #${w.id}`, err);
+    }
+  }
+}
+
+export function startWatcher(db: Db, deps: Deps, everyMs = 60_000): () => void {
+  const timer = setInterval(() => void tick(db, deps), everyMs);
+  timer.unref(); // the message stream keeps the process alive, not this timer
+  void tick(db, deps);
+  return () => clearInterval(timer);
+}
