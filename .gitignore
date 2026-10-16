@@ -4,3 +4,4 @@ node_modules/
 *.sqlite-*
 kaypoh.log
 demo/
+.DS_Store
