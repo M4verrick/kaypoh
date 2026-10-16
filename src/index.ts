@@ -98,6 +98,7 @@ if (import.meta.main) {
       const space = await resolveSpace(w);
       if (!space) throw new Error(`no space for watch #${w.id}`);
       await sendText(space, w.platform, text);
+      console.log(`[alert] watch #${w.id} -> ${w.platform} ${w.sender}: ${text.slice(0, 160).replace(/\n/g, " / ")}`);
     },
   });
 

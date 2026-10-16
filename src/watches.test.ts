@@ -170,13 +170,25 @@ describe("runAgent", () => {
     expect(calls.filter((c) => c.startsWith("POST")).length).toBe(1);
   });
 
+  test("a queued run gets its budget from when it starts", async () => {
+    let polls = 0;
+    const startedAt = new Date().toISOString();
+    const { f } = fakeFetch([
+      { test: /run-async$/, body: () => ({ run_id: "r3", error: null }) },
+      // first polls: still queued (no started_at); then running from now; then done
+      { test: /\/v1\/runs\/r3$/, body: () => (++polls < 3 ? { status: "PENDING", started_at: null } : polls < 5 ? { status: "RUNNING", started_at: startedAt } : { status: "COMPLETED", started_at: startedAt, result: { ok: true }, num_of_steps: 2, streaming_url: null }) },
+    ]);
+    const run = await runAgent({ url: "https://x", goal: "queued", max_seconds: 0 }, { fetchImpl: f, pollMs: 1, graceMs: 50, queueMs: 500 });
+    expect(run.status).toBe("COMPLETED");
+  });
+
   test("cancels and reports TIMEOUT when it overruns", async () => {
     const { f, calls } = fakeFetch([
       { test: /run-async$/, body: () => ({ run_id: "r2", error: null }) },
       { test: /\/v1\/runs\/r2$/, body: () => ({ status: "RUNNING" }) },
       { test: /\/cancel$/, body: () => ({ status: "CANCELLED" }) },
     ]);
-    const run = await runAgent({ url: "https://x", goal: "slow", max_seconds: 0 }, { fetchImpl: f, pollMs: 1, graceMs: 20 });
+    const run = await runAgent({ url: "https://x", goal: "slow", max_seconds: 0 }, { fetchImpl: f, pollMs: 1, graceMs: 20, queueMs: 0 });
     expect(run.status).toBe("TIMEOUT");
     expect(calls.some((c) => c.endsWith("/cancel"))).toBe(true);
   });

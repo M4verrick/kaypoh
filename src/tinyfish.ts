@@ -60,7 +60,7 @@ export async function fetchPages(urls: string[], opts: { purpose?: string; ttl?:
 /** Start an Agent run (run-async), poll until terminal, cancel if it overruns. */
 export async function runAgent(
   req: { url: string; goal: string; output_schema?: object; max_seconds?: number },
-  deps: { fetchImpl?: typeof fetch; pollMs?: number; graceMs?: number } = {},
+  deps: { fetchImpl?: typeof fetch; pollMs?: number; graceMs?: number; queueMs?: number } = {},
 ): Promise<AgentRun> {
   const f = deps.fetchImpl ?? fetch;
   const maxSeconds = req.max_seconds ?? 180;
@@ -74,15 +74,20 @@ export async function runAgent(
   const started = (await start.json()) as { run_id: string | null; error: { message?: string } | null };
   if (!started.run_id) throw new Error(`Agent did not start: ${started.error?.message ?? "unknown error"}`);
 
-  const deadline = Date.now() + maxSeconds * 1000 + (deps.graceMs ?? 60_000); // anti-bot sites can run past their own cap by a minute
-  while (Date.now() < deadline) {
+  // The budget counts from when a browser actually starts on the run (runs can queue), with a hard cap on total waiting.
+  const grace = deps.graceMs ?? 60_000; // anti-bot sites can run past their own cap by a minute
+  const submitted = Date.now();
+  const hardCap = submitted + maxSeconds * 1000 + grace + (deps.queueMs ?? 180_000);
+  let deadline = submitted + maxSeconds * 1000 + grace;
+  while (Date.now() < Math.min(deadline, hardCap)) {
     await Bun.sleep(deps.pollMs ?? 5000);
     const res = await f(`${AGENT}/v1/runs/${started.run_id}`, { headers });
     if (!res.ok) throw new Error(await httpError("Agent", res));
-    const run = (await res.json()) as { status: string; result: unknown; error: { message?: string } | null; num_of_steps: number | null; streaming_url: string | null };
+    const run = (await res.json()) as { status: string; started_at?: string | null; result: unknown; error: { message?: string } | null; num_of_steps: number | null; streaming_url: string | null };
     if (run.status === "COMPLETED" || run.status === "FAILED" || run.status === "CANCELLED") {
       return { run_id: started.run_id, status: run.status, result: run.result ?? null, error: run.error?.message ?? null, steps: run.num_of_steps ?? null, streaming_url: run.streaming_url ?? null };
     }
+    if (run.started_at) deadline = Math.max(deadline, Date.parse(run.started_at) + maxSeconds * 1000 + grace);
   }
   await f(`${AGENT}/v1/runs/${started.run_id}/cancel`, { method: "POST", headers }).catch(() => {});
   return { run_id: started.run_id, status: "TIMEOUT", result: null, error: `gave up after ${maxSeconds} s`, steps: null, streaming_url: null };
