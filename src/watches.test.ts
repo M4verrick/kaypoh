@@ -116,6 +116,44 @@ describe("tick", () => {
     expect(h.db.watchesToVisit()[0]!.pending_notice).toBeNull();
   });
 
+  test("cancelling a quiet-hours watch discards its queued notice", async () => {
+    const night = SGT("2026-10-16T23:30:00").getTime();
+    const h = harness(night);
+    const id = h.db.addWatch({ sender: "u", space_id: "chat-1", platform: "terminal", url: "https://shop.example/x", condition: "price below S$60", interval_min: 60, any_time: false, days: 14 }, night);
+    h.setJudgement({ met: true, value: "S$58", note: "Dropped." });
+    await tick(h.db, h.deps);
+    expect(h.db.watchesToVisit()[0]!.pending_notice).toContain("S$58");
+    h.db.cancelWatch(id);
+    h.setNow(SGT("2026-10-17T08:00:30").getTime());
+    await tick(h.db, h.deps);
+    expect(h.sent).toEqual([]);
+    expect(h.db.watchesToVisit()).toEqual([]);
+  });
+
+  for (const boundary of ["fetch", "judge"] as const) test(`cancellation during ${boundary} prevents a later notice`, async () => {
+    const h = harness(noon);
+    const id = h.db.addWatch({ sender: "u", space_id: "chat-1", platform: "terminal", url: "https://shop.example/x", condition: "price below S$60", interval_min: 60, any_time: true, days: 14 }, noon);
+    h.setJudgement({ met: true, value: "S$58", note: "Dropped." });
+    await tick(h.db, {
+      ...h.deps,
+      fetchPages: async () => { if (boundary === "fetch") h.db.cancelWatch(id); return h.deps.fetchPages(); },
+      judge: async (condition) => { if (boundary === "judge") h.db.cancelWatch(id); return h.deps.judge(condition); },
+    });
+    expect(h.sent).toEqual([]);
+    expect(h.db.watchesToVisit()).toEqual([]);
+  });
+
+  test("cancelling a queued later watch during another watch's fetch discards the captured notice", async () => {
+    const h = harness(noon);
+    const watch = { sender: "u", space_id: "chat-1", platform: "terminal", condition: "price below S$60", interval_min: 60, any_time: true, days: 14 };
+    h.db.addWatch({ ...watch, url: "https://shop.example/a" }, noon);
+    const later = h.db.addWatch({ ...watch, url: "https://shop.example/b" }, noon);
+    h.db.updateWatch(later, { pending_notice: "Queued match from last night", deliver_after: noon });
+    await tick(h.db, { ...h.deps, fetchPages: async () => { h.db.cancelWatch(later); return h.deps.fetchPages(); } });
+    expect(h.sent).toEqual([]);
+    expect(h.db.watchesToVisit().map((w) => w.id)).toEqual([1]);
+  });
+
   test("agent-mode watches read through a browser run instead of Fetch", async () => {
     const h = harness(noon);
     h.db.addWatch({ sender: "u", space_id: "chat-1", platform: "terminal", url: "https://ticketmaster.example/x", condition: "price below S$40", interval_min: 360, any_time: true, days: 14, mode: "agent" }, noon);
@@ -141,6 +179,34 @@ describe("tick", () => {
     expect(h.sent.length).toBe(1);
     expect(h.sent[0]).toContain("Stopped watching");
     expect(h.db.activeWatches("u")).toEqual([]);
+  });
+
+  test("expiry does not say a previously matched condition never happened", async () => {
+    const h = harness(noon);
+    h.db.addWatch({ sender: "u", space_id: "chat-1", platform: "terminal", url: "https://shop.example/x", condition: "price below S$60", interval_min: 60, any_time: true, days: 1 }, noon);
+    h.setJudgement({ met: true, value: "S$58", note: "Dropped." });
+    await tick(h.db, h.deps);
+    h.setNow(noon + 25 * HOUR);
+    await tick(h.db, h.deps);
+    expect(h.sent).toHaveLength(2);
+    expect(h.sent[1]).toContain("Stopped watching");
+    expect(h.sent[1]).not.toContain("never hit");
+    expect(h.db.activeWatches("u")).toEqual([]);
+  });
+
+  test("an inactive expiry notice still waits for morning and is then delivered", async () => {
+    const night = SGT("2026-10-16T23:30:00").getTime();
+    const h = harness(night);
+    h.db.addWatch({ sender: "u", space_id: "chat-1", platform: "terminal", url: "https://shop.example/x", condition: "price below S$60", interval_min: 60, any_time: false, days: 1 }, night - 25 * HOUR);
+    await tick(h.db, h.deps);
+    expect(h.sent).toEqual([]);
+    expect(h.db.activeWatches("u")).toEqual([]);
+    expect(h.db.watchesToVisit()[0]!.pending_notice).toContain("Stopped watching");
+    h.setNow(SGT("2026-10-17T08:00:30").getTime());
+    await tick(h.db, h.deps);
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]).toContain("Stopped watching");
+    expect(h.db.watchesToVisit()).toEqual([]);
   });
 });
 

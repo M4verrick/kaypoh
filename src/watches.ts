@@ -110,7 +110,9 @@ export async function tick(db: Db, deps: Deps): Promise<void> {
     db.updateWatch(w.id, { pending_notice: null, deliver_after: null });
   };
 
-  for (const w of db.watchesToVisit()) {
+  for (const scheduled of db.watchesToVisit()) {
+    const w = db.watch(scheduled.id);
+    if (!w) continue;
     try {
       if (w.pending_notice) {
         if (w.deliver_after !== null && w.deliver_after <= now) await notify({ ...w, any_time: 1 }, w.pending_notice);
@@ -120,13 +122,15 @@ export async function tick(db: Db, deps: Deps): Promise<void> {
       if (now >= w.expires_at) {
         db.updateWatch(w.id, { active: 0 });
         const days = Math.round((w.expires_at - w.created_at) / 86_400_000);
-        await notify(w, `Stopped watching ${w.url} after ${days} days. It never hit "${w.condition}". Last seen: ${w.last_value ?? "unknown"}.`);
+        const outcome = w.notify_count ? "It matched your condition earlier." : `It never hit "${w.condition}".`;
+        await notify(w, `Stopped watching ${w.url} after ${days} days. ${outcome} Last seen: ${w.last_value ?? "unknown"}.`);
         continue;
       }
       if (w.last_check_at && now - w.last_check_at < w.interval_min * 60_000) continue;
       db.updateWatch(w.id, { last_check_at: now }); // claim the slot before the slow fetch so an overlapping tick skips it
 
       const page = await readPage(w);
+      if (!db.watch(w.id)?.active) continue;
       console.log(`${ts()} [watch] #${w.id} ${w.mode} ${w.url}: ${page.text === null ? `unreadable (${page.why})` : `read ${page.text.length} chars`}`);
       if (page.text === null) {
         const n = w.error_count + 1;
@@ -144,6 +148,7 @@ export async function tick(db: Db, deps: Deps): Promise<void> {
         continue;
       }
       const j = await judge(w.condition, page.text, w.last_value);
+      if (!db.watch(w.id)?.active) continue;
       console.log(`${ts()} [watch] #${w.id} judged: ${j.met ? "MET" : "not met"} value=${j.value} note=${j.note}`);
       const d = decide(w, j, now);
       db.updateWatch(w.id, { ...d.patch, last_hash: hash, error_count: 0 });

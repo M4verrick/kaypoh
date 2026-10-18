@@ -107,6 +107,9 @@ export function openDb(path = process.env.KAYPOH_DB ?? "kaypoh.sqlite") {
         ? (db.query("select * from watches where active = 1 and sender = ? order by id").all(sender) as Watch[])
         : (db.query("select * from watches where active = 1 order by id").all() as Watch[]);
     },
+    watch(id: number): Watch | null {
+      return db.query("select * from watches where id = ?").get(id) as Watch | null;
+    },
     /** What the scheduler visits: live watches plus any with a notice waiting for morning. */
     watchesToVisit(): Watch[] {
       return db.query("select * from watches where active = 1 or pending_notice is not null order by id").all() as Watch[];
@@ -117,7 +120,7 @@ export function openDb(path = process.env.KAYPOH_DB ?? "kaypoh.sqlite") {
       db.run(`update watches set ${keys.map((k) => `${k} = ?`).join(", ")} where id = ?`, [...keys.map((k) => patch[k] as string | number | null), id]);
     },
     cancelWatch(id: number): void {
-      db.run("update watches set active = 0 where id = ?", [id]);
+      db.run("update watches set active = 0, pending_notice = null, deliver_after = null where id = ?", [id]);
     },
 
     // Agent run budget (rolling 24 h per person)

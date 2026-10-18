@@ -161,3 +161,10 @@ test("firstUrl, platform split and image blocks", async () => {
   expect(await toImageBlock(jpeg, "application/pdf")).toBeNull();
   expect(await toImageBlock(new Uint8Array(5_000_000), "image/png")).toBeNull();
 });
+
+test("iMessage retains the agent's source preview when the bubble cites only its host", () => {
+  const result = ensureSources("It's S$58.", { used: ["https://trip.com/x"], searched: [], failed: [] }, { inlineUrl: false });
+  expect(splitForPlatform(result.text, "imessage", result.primaryUrl)).toEqual({ text: result.text, url: "https://trip.com/x" });
+  expect(splitForPlatform(result.text, "terminal", result.primaryUrl)).toEqual({ text: result.text });
+  expect(splitForPlatform("See https://trip.com/y", "imessage", result.primaryUrl).url).toBe("https://trip.com/y");
+});

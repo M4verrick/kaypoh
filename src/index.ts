@@ -53,8 +53,8 @@ export async function toImageBlock(bytes: Uint8Array, mime: string): Promise<Ima
 }
 
 /** On iMessage the first URL leaves the bubble and becomes one rich-link preview; elsewhere the text stands alone. */
-export function splitForPlatform(text: string, platform: string): { text: string; url?: string } {
-  const url = firstUrl(text);
+export function splitForPlatform(text: string, platform: string, primaryUrl?: string): { text: string; url?: string } {
+  const url = firstUrl(text) ?? primaryUrl;
   if (platform !== "imessage" || !url) return { text };
   return { text: text.replace(url, hostOf(url)).replace(/[ \t]*\n{2,}/g, "\n\n").trim(), url };
 }
@@ -78,8 +78,8 @@ if (import.meta.main) {
     chains.set(key, next);
     return next;
   };
-  const sendText = async (space: Space, platform: string, text: string) => {
-    const parts = splitForPlatform(text, platform);
+  const sendText = async (space: Space, platform: string, text: string, primaryUrl?: string) => {
+    const parts = splitForPlatform(text, platform, primaryUrl);
     await space.send(markdown(parts.text));
     if (parts.url) await space.send(richlink(parts.url)).catch(() => {});
   };
@@ -121,7 +121,7 @@ if (import.meta.main) {
     await space.responding(async () => {
       try {
         const turn = await runTurn(db, { spaceId, sender, platform, text, images, onLongJob });
-        await sendText(space, platform, turn.reply);
+        await sendText(space, platform, turn.reply, turn.primaryUrl);
         turn.commit(); // history records only what was actually delivered
         console.log(`${ts()} [out] ${platform} ${sender} (${Math.round((Date.now() - started) / 1000)} s): ${turn.reply.slice(0, 160).replace(/\n/g, " / ")}`);
       } catch (err) {
