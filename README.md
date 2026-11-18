@@ -33,6 +33,7 @@ per conversation, in one SQLite file.
 bun install
 cp .env.example .env   # ANTHROPIC_API_KEY, TINYFISH_API_KEY; SPECTRUM_PROJECT_ID/SECRET for iMessage
 bun run src/index.ts    # terminal chat for local use; iMessage joins when the Photon vars are set
+                        # KAYPOH_TERMINAL=0 runs it headless (iMessage only)
 bun test
 ```
 
